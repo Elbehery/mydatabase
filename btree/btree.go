@@ -1,6 +1,7 @@
 package btree
 
 import (
+	"bytes"
 	"encoding/binary"
 	"etcd/raft/raftexample/verify"
 )
@@ -93,4 +94,64 @@ type BTree struct {
 	get  func(uint64) BNode // deref a page
 	new  func(BNode) uint64 // allocate a page
 	del  func(uint64)       // delete a page
+}
+
+func nodeLookupLE(node BNode, key []byte) uint16 {
+	nkeys := node.nKeys()
+	found := uint16(0)
+
+	for i := uint16(1); i < nkeys; i++ {
+		cmp := bytes.Compare(node.getKey(i), key)
+		if cmp <= 0 {
+			found = i
+		}
+		if cmp >= 0 {
+			break
+		}
+	}
+	return found
+}
+
+// add a new key to a leaf node
+func leafInsert(new BNode, old BNode, idx uint16, key []byte, val []byte) {
+	new.setHeader(BNODE_LEAF, old.nKeys()+1)
+	nodeAppendRange(new, old, 0, 0, idx)
+	nodeAppendKV(new, idx, 0, key, val)
+	nodeAppendRange(new, old, idx+1, idx, old.nKeys()-idx)
+}
+
+func nodeAppendRange(new BNode, old BNode, dstNew uint16, srcOld uint16, n uint16) {
+	verify.Assert(srcOld+n <= old.nKeys(), "")
+	verify.Assert(dstNew+n <= new.nKeys(), "")
+	if n == 0 {
+		return
+	}
+	// pointers
+	for i := uint16(0); i < n; i++ {
+		new.setPtr(uint64(dstNew+i), old.getPtr(uint64(srcOld+i)))
+	}
+	// offsets
+	dstBegin := new.getOffset(dstNew)
+	srcBegin := old.getOffset(srcOld)
+	for i := uint16(1); i <= n; i++ { // NOTE: the range is [1, n]
+		offset := dstBegin + old.getOffset(srcOld+i) - srcBegin
+		new.setOffset(dstNew+i, offset)
+	}
+	// KVs
+	begin := old.kvPos(srcOld)
+	end := old.kvPos(srcOld + n)
+	copy(new.data[new.kvPos(dstNew):], old.data[begin:end])
+}
+
+// copy a KV into the position
+func nodeAppendKV(new BNode, idx uint16, ptr uint64, key []byte, val []byte) { // ptrs
+	new.setPtr(uint64(idx), ptr)
+	// KVs
+	pos := new.kvPos(idx)
+	binary.LittleEndian.PutUint16(new.data[pos+0:], uint16(len(key)))
+	binary.LittleEndian.PutUint16(new.data[pos+2:], uint16(len(val)))
+	copy(new.data[pos+4:], key)
+	copy(new.data[pos+4+uint16(len(key)):], val)
+	// the offset of the next key
+	new.setOffset(idx+1, new.getOffset(idx)+4+uint16((len(key)+len(val))))
 }
